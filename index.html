@@ -451,6 +451,7 @@ html,body{
     <div class="logo-row">
       <span class="hw-logo">🔥 HOT WHEELS</span>
       <button class="cam-btn" id="camBtn" onclick="toggleCamera()">📷 CAM OFF</button>
+      <button class="cam-btn" id="camFlipBtn" onclick="flipCamera()" style="display:none">🔄</button>
     </div>
     <div class="name-row">
       <input class="car-input" id="carName" type="text" placeholder="Car name…" maxlength="28" autocomplete="off" autocorrect="off" spellcheck="false">
@@ -538,7 +539,7 @@ html,body{
 // ══ STATE ══
 let startTime=null,intervalId=null,elapsed=0,running=false,curName='';
 let races=[],raceCount=0;
-let stream=null,camActive=false;
+let stream=null,camActive=false,facingMode='environment';
 let zone=null,drawing=false,drawStart=null,prevFrame=null;
 let sensitivity=22,cooldown=false,rafId=null;
 
@@ -858,20 +859,15 @@ async function toggleCamera(){
     }
     el('camBtn').textContent='📷 STARTING…';el('camBtn').disabled=true;
     try{
-      // Front camera (user-facing) — no flip needed
-      try{
-        stream=await navigator.mediaDevices.getUserMedia({
-          video:{facingMode:'user',width:{ideal:1280},height:{ideal:720}}
-        });
-      }catch{
-        stream=await navigator.mediaDevices.getUserMedia({video:true});
-      }
+      // Rear/environment camera by default — points at the track. flipCamera() can switch to front.
+      stream=await acquireStream(facingMode);
       const vid=el('camVideo');
       vid.srcObject=stream;
       await new Promise((res,rej)=>{vid.onloadedmetadata=res;vid.onerror=rej;setTimeout(()=>rej(new Error('timeout')),5000)});
       await vid.play();
       camActive=true;
       el('camBtn').textContent='📷 CAM ON';el('camBtn').classList.add('on');el('camBtn').disabled=false;
+      el('camFlipBtn').style.display='inline-block';
       el('motionStrip').style.display='flex';
       el('sensRow').style.display='flex';
       setCamBadge('ready');
@@ -904,11 +900,43 @@ async function toggleCamera(){
   }
 }
 
+async function acquireStream(desiredFacing){
+  try{
+    return await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:desiredFacing},width:{ideal:1280},height:{ideal:720}}
+    });
+  }catch{
+    return await navigator.mediaDevices.getUserMedia({video:true});
+  }
+}
+
+async function flipCamera(){
+  if(!camActive)return;
+  const prevFacing=facingMode;
+  facingMode=facingMode==='environment'?'user':'environment';
+  el('camFlipBtn').disabled=true;
+  try{
+    if(stream)stream.getTracks().forEach(t=>t.stop());
+    stream=await acquireStream(facingMode);
+    const vid=el('camVideo');
+    vid.srcObject=stream;
+    await new Promise((res,rej)=>{vid.onloadedmetadata=res;vid.onerror=rej;setTimeout(()=>rej(new Error('timeout')),5000)});
+    await vid.play();
+    resyncCameraLayout();
+  }catch(e){
+    facingMode=prevFacing;
+    showErr('CAMERA ERROR','Could not switch camera.<br><code>'+e.name+'</code>');
+  }finally{
+    el('camFlipBtn').disabled=false;
+  }
+}
+
 function stopCamera(){
   if(stream)stream.getTracks().forEach(t=>t.stop());
   camActive=false;stream=null;prevFrame=null;zone=null;
   if(rafId)cancelAnimationFrame(rafId);
   el('camBtn').textContent='📷 CAM OFF';el('camBtn').classList.remove('on');el('camBtn').disabled=false;
+  el('camFlipBtn').style.display='none';
   el('motionStrip').style.display='none';
   el('sensRow').style.display='none';
   clearCanvases();
@@ -917,14 +945,37 @@ function stopCamera(){
 
 function syncCanvasSizes(){
   const vid=el('camVideo');
+  // Canvases are sized to the on-screen box (not the video's native capture
+  // resolution) so drawn zones/heat align 1:1 with what's actually visible.
+  // #camVideo uses object-fit:cover, so the mapping back to native video
+  // pixels for sampling happens separately in videoCoverTransform().
   const set=()=>{
     [el('detCanvas'),el('zoneCanvas')].forEach(c=>{
-      c.width=vid.videoWidth||window.innerWidth;
-      c.height=vid.videoHeight||window.innerHeight;
+      c.width=window.innerWidth;
+      c.height=window.innerHeight;
     });
   };
   vid.addEventListener('loadedmetadata',set);set();
 }
+
+// Maps the on-screen (object-fit:cover) box back to the video's native
+// pixel space, so a zone drawn on screen samples the correct source region.
+function videoCoverTransform(vid){
+  const boxW=window.innerWidth,boxH=window.innerHeight;
+  const vw=vid.videoWidth||boxW,vh=vid.videoHeight||boxH;
+  const scale=Math.max(boxW/vw,boxH/vh);
+  return{scale,offX:(vw*scale-boxW)/2,offY:(vh*scale-boxH)/2,boxW,boxH};
+}
+
+function resyncCameraLayout(){
+  if(!camActive)return;
+  zone=null;prevFrame=null;
+  clearCanvases();
+  syncCanvasSizes();
+  setCamBadge('ready');
+}
+window.addEventListener('resize',resyncCameraLayout);
+window.addEventListener('orientationchange',()=>setTimeout(resyncCameraLayout,300));
 
 function clearCanvases(){
   [el('detCanvas'),el('zoneCanvas')].forEach(c=>{
@@ -998,7 +1049,14 @@ function detectMotion(){
   const vid=el('camVideo');
   if(vid.readyState<2)return;
   const zw=offscreen.width,zh=offscreen.height;
-  offCtx.drawImage(vid,zone.x*vid.videoWidth,zone.y*vid.videoHeight,zone.w*vid.videoWidth,zone.h*vid.videoHeight,0,0,zw,zh);
+  // Zone coords are normalized to the on-screen (object-fit:cover) box; map
+  // them through the cover transform to sample the matching native video pixels.
+  const t=videoCoverTransform(vid);
+  const sx=(zone.x*t.boxW+t.offX)/t.scale;
+  const sy=(zone.y*t.boxH+t.offY)/t.scale;
+  const sw=(zone.w*t.boxW)/t.scale;
+  const sh=(zone.h*t.boxH)/t.scale;
+  offCtx.drawImage(vid,sx,sy,sw,sh,0,0,zw,zh);
   const cur=offCtx.getImageData(0,0,zw,zh).data;
   if(!prevFrame){prevFrame=new Uint8ClampedArray(cur);return}
   let diff=0;const total=zw*zh;
