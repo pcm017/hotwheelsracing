@@ -421,6 +421,37 @@ html,body{
 #flash.show{animation:flashOut .6s ease-out forwards}
 @keyframes flashOut{0%{opacity:1}100%{opacity:0}}
 
+/* ── SPOTLIGHT: dims edges, draws focus to the track while a race is live ── */
+#spotlight{
+  position:fixed;inset:0;z-index:3;pointer-events:none;
+  background:radial-gradient(ellipse at center,rgba(0,0,0,0) 0%,rgba(0,0,0,0) 35%,rgba(0,0,0,.55) 100%);
+  opacity:0;transition:opacity .5s ease;
+}
+#spotlight.show{opacity:1}
+
+/* ── CROWD WAVE: brief celebratory flash bar when all races end ── */
+#crowdWave{
+  position:fixed;left:0;right:0;top:50%;height:70px;z-index:25;
+  transform:translateY(-50%) scaleY(0);
+  background:var(--flame);
+  box-shadow:0 0 40px rgba(232,0,13,.6);
+  pointer-events:none;
+  transition:transform .3s ease;
+}
+#crowdWave.show{transform:translateY(-50%) scaleY(1)}
+
+/* ── LIVE COMMENTARY BUBBLE: short hype captions during a race ── */
+#liveBubble{
+  position:fixed;left:50%;top:34%;z-index:6;
+  transform:translate(-50%,10px);
+  pointer-events:none;max-width:90vw;text-align:center;
+  font-family:'Orbitron',monospace;font-weight:900;
+  font-size:clamp(16px,5.5vw,26px);letter-spacing:1px;color:#fff;
+  text-shadow:0 0 14px rgba(232,0,13,.9),0 2px 6px rgba(0,0,0,.8);
+  opacity:0;transition:opacity .2s ease,transform .2s ease;
+}
+#liveBubble.show{opacity:1;transform:translate(-50%,0)}
+
 @keyframes confettiFall{0%{transform:translateY(-10px) rotate(0deg);opacity:1}100%{transform:translateY(100vh) rotate(720deg);opacity:0}}
 </style>
 </head>
@@ -439,6 +470,11 @@ html,body{
 
 <!-- Flash -->
 <div id="flash"></div>
+
+<!-- Race-start spotlight, end-of-race crowd wave, live commentary bubble -->
+<div id="spotlight"></div>
+<div id="crowdWave"></div>
+<div id="liveBubble"></div>
 
 <!-- Zone draw instruction toast -->
 <div id="zoneToast">✋ DRAG TO SET<br>FINISH LINE ZONE</div>
@@ -566,12 +602,13 @@ function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g
 let countingDown = false;
 
 function startTimer(){
-  const name=el('carName').value.trim();
-  if(!name){
-    const i=el('carName');i.focus();i.style.borderColor='#e8000d';
-    setTimeout(()=>i.style.borderColor='',1200);return;
-  }
   if(running||countingDown)return;
+  let name=el('carName').value.trim();
+  if(!name){
+    name=`Car ${raceCount+1}`;
+    el('carName').value=name;
+  }
+  el('carName').blur(); // dismiss iOS keyboard so it can't swallow/obscure the countdown UI
   try{ getAudioCtx(); }catch(e){}
 
   countingDown=true; el('btnStart').disabled=true; curName=name;
@@ -608,7 +645,10 @@ function startTimer(){
     } else { clearInterval(cdInterval); }
   },600);
 
-  playCountdownBeeps(()=>{
+  let goFired=false;
+  const go=()=>{
+    if(goFired)return;goFired=true;
+    clearTimeout(goWatchdog);
     countingDown=false; running=true; elapsed=0;
     startTime=performance.now();
     td.textContent='00:00'; td.style.color='';
@@ -622,7 +662,13 @@ function startTimer(){
     if(camActive&&zone)setCamBadge('watching');
     // Start live commentary + heartbeat
     startLiveCommentary();
-  });
+  };
+  // Watchdog: guarantees the race starts even if the audio-driven countdown
+  // callback never fires (e.g. iOS throttling timers around a focus change).
+  // Without this, countingDown could get stuck true and every future START
+  // tap would silently no-op forever.
+  const goWatchdog=setTimeout(go,3000);
+  playCountdownBeeps(go);
 }
 
 function finishTimer(skipSave){
